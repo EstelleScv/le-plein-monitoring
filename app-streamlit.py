@@ -1,6 +1,6 @@
 """
-Dashboard Streamlit - Monitoring Le Plein
-Connexion directe à MotherDuck + Interface moderne
+Dashboard Streamlit - Monitoring Le Plein V2
+Connexion à la vue agrégée analytics.main.le_plein_monitoring_aggregated
 """
 
 import streamlit as st
@@ -18,7 +18,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS pour un design moderne
+# Custom CSS
 st.markdown("""
 <style>
     .main-header {
@@ -32,18 +32,6 @@ st.markdown("""
         color: #6a6a6a;
         margin-bottom: 2rem;
     }
-    .metric-card {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        border-left: 4px solid;
-    }
-    .stMetric {
-        background: white;
-        padding: 1rem;
-        border-radius: 8px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -55,11 +43,11 @@ st.markdown('<div class="sub-header">Dashboard de monitoring des bornes de recha
 with st.sidebar:
     st.header("🔧 Configuration")
     
-    # Token MotherDuck (stocké de manière sécurisée)
+    # Token MotherDuck
     motherduck_token = st.text_input(
         "Token MotherDuck",
         type="password",
-        help="Colle ton token MotherDuck ici. Il sera stocké uniquement dans ta session."
+        help="Colle ton token MotherDuck ici"
     )
     
     # Sélection du mois
@@ -67,84 +55,58 @@ with st.sidebar:
     selected_month = st.selectbox(
         "Mois",
         ["2026-05", "2026-04", "2026-03", "2026-02", "2026-01"],
-        index=3  # 2026-02 par défaut
+        index=1  # 2026-04 par défaut
     )
     
-    # Filtre enseigne (sera rempli dynamiquement)
-    selected_enseigne = st.selectbox(
+    # Filtre enseigne
+    selected_retailer = st.selectbox(
         "Enseigne",
         ["Toutes"]
     )
     
-    # Bouton de rafraîchissement
     refresh = st.button("🔄 Actualiser les données", use_container_width=True)
 
-# Fonction de connexion à MotherDuck
+# Connexion à MotherDuck
 @st.cache_resource
 def get_motherduck_connection(token):
     """Crée une connexion à MotherDuck"""
     if not token:
         return None
     try:
-        connection_string = f'md:production-data?motherduck_token={token}'
+        connection_string = f'md:analytics?motherduck_token={token}'
         return duckdb.connect(connection_string)
     except Exception as e:
         st.error(f"Erreur de connexion : {e}")
         return None
 
-# Fonction pour récupérer les données
-@st.cache_data(ttl=300)  # Cache pendant 5 minutes
+# Récupération des données
+@st.cache_data(ttl=300)
 def fetch_monitoring_data(_con, month):
-    """Récupère les données de monitoring depuis MotherDuck"""
+    """Récupère les données depuis la vue agrégée"""
     if _con is None:
         return None
     
+    # Extraire année et mois
+    year, month_num = month.split('-')
+    
     query = f"""
-    WITH monthly_sessions AS (
-      SELECT
-        lps.store AS site,
-        lps.retailer AS enseigne,
-        strftime(DATE_TRUNC('month', lps.started_at), '%Y-%m') AS mois,
-        COUNT(DISTINCT lps.id) AS sessions_all,
-        COUNT(DISTINCT CASE WHEN lps.token_type = 'APP_USER' THEN lps.id END) AS sessions_lp,
-        SUM(lps.energy_kwh) AS kwh_livre,
-        SUM(CASE WHEN lps.token_type = 'APP_USER' THEN lps.energy_kwh ELSE 0 END) AS kwh_lp,
-        COUNT(DISTINCT CASE WHEN lps.token_type = 'RFID' THEN lps.id END) AS sessions_rfid,
-        COUNT(DISTINCT CASE WHEN ll.status IN ('ok', 'N/A', 'bypass') THEN ll.le_plein_session_id END) AS sessions_fid,
-        COUNT(DISTINCT CASE WHEN lps.token_type = 'APP_USER' THEN lps.user_id END) AS clients_uniques,
-        AVG(lps.plugged_in_duration_in_min) AS temps_branch_moy,
-        COUNT(DISTINCT CASE WHEN cp.max_power_in_kw <= 22 THEN lps.id END) AS sessions_eco,
-        COUNT(DISTINCT CASE WHEN cp.max_power_in_kw > 22 AND cp.max_power_in_kw <= 100 THEN lps.id END) AS sessions_fast,
-        COUNT(DISTINCT CASE WHEN cp.max_power_in_kw > 100 THEN lps.id END) AS sessions_ultra
-      FROM "production-data"."silver"."le_plein_billable_sessions" lps
-      LEFT JOIN "production-data"."silver"."loyalty_ledger" ll ON lps.id = ll.le_plein_session_id
-      LEFT JOIN "production-data"."silver"."charging_points" cp ON lps.evse_id = cp.evse_id
-      WHERE strftime(DATE_TRUNC('month', lps.started_at), '%Y-%m') = '{month}'
-      GROUP BY 1, 2, 3
-    ),
-    availability AS (
-      SELECT
-        s.internal_name AS site,
-        COUNT(DISTINCT cp.evse_id) AS pdc_actifs,
-        COUNT(DISTINCT CASE WHEN cp.status != 'available' THEN cp.evse_id END) AS pdc_hs
-      FROM "production-data"."silver"."charging_points" cp
-      JOIN "production-data"."silver"."stations" s ON cp.station_id = s.id
-      WHERE s.in_le_plein_network = TRUE
-      GROUP BY 1
-    )
     SELECT
-      ms.*,
-      COALESCE(a.pdc_actifs, 0) AS pdc_actifs,
-      COALESCE(a.pdc_hs, 0) AS pdc_hs,
-      ROUND(ms.sessions_lp::DOUBLE / NULLIF(ms.sessions_all, 0) * 100, 1) AS pdm_lp,
-      ROUND(ms.sessions_rfid::DOUBLE / NULLIF(ms.sessions_all, 0) * 100, 1) AS pdm_rfid,
-      ROUND(ms.sessions_fid::DOUBLE / NULLIF(ms.sessions_lp, 0) * 100, 1) AS taux_fid,
-      ROUND(ms.sessions_eco::DOUBLE / NULLIF(ms.sessions_all, 0) * 100, 1) AS pct_eco,
-      ROUND(ms.sessions_fast::DOUBLE / NULLIF(ms.sessions_all, 0) * 100, 1) AS pct_fast,
-      ROUND(ms.sessions_ultra::DOUBLE / NULLIF(ms.sessions_all, 0) * 100, 1) AS pct_ultra
-    FROM monthly_sessions ms
-    LEFT JOIN availability a ON ms.site = a.site
-    ORDER BY ms.enseigne, ms.site
+        retailer AS enseigne,
+        store AS site,
+        SUM(sessions_lp) AS sessions_lp,
+        SUM(clients_lp) AS clients_lp,
+        SUM(sessions_fid) AS sessions_fid,
+        SUM(sessions_emsp) AS sessions_emsp,
+        SUM(sessions_chargemap) AS sessions_chargemap,
+        SUM(sessions_totalenergies) AS sessions_totalenergies,
+        SUM(sessions_lp + sessions_emsp + sessions_chargemap + sessions_totalenergies) AS sessions_total,
+        ROUND(SUM(sessions_lp)::DOUBLE / NULLIF(SUM(sessions_lp + sessions_emsp + sessions_chargemap + sessions_totalenergies), 0) * 100, 1) AS pdm_lp,
+        ROUND(SUM(sessions_fid)::DOUBLE / NULLIF(SUM(sessions_lp), 0) * 100, 1) AS taux_fid
+    FROM analytics.main.le_plein_monitoring_aggregated
+    WHERE YEAR(day) = {year}
+      AND MONTH(day) = {month_num}
+    GROUP BY retailer, store
+    ORDER BY retailer, store
     """
     
     try:
@@ -152,6 +114,7 @@ def fetch_monitoring_data(_con, month):
         return df
     except Exception as e:
         st.error(f"Erreur lors de la récupération des données : {e}")
+        st.code(query)  # Affiche la requête pour debug
         return None
 
 # Vérification du token
@@ -166,7 +129,7 @@ if not motherduck_token:
     """)
     st.stop()
 
-# Connexion à MotherDuck
+# Connexion
 con = get_motherduck_connection(motherduck_token)
 
 if con is None:
@@ -187,11 +150,10 @@ st.header("📊 Indicateurs Clés")
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    total_sessions = df['sessions_lp'].sum()
+    total_sessions_lp = df['sessions_lp'].sum()
     st.metric(
         label="Sessions Le Plein",
-        value=f"{total_sessions:,.0f}",
-        delta=None,
+        value=f"{total_sessions_lp:,.0f}",
         help="Nombre total de sessions Le Plein"
     )
 
@@ -200,26 +162,23 @@ with col2:
     st.metric(
         label="Part de Marché Moyenne",
         value=f"{avg_pdm:.1f}%",
-        delta=None,
         help="Part de marché moyenne Le Plein"
     )
 
 with col3:
-    total_clients = df['clients_uniques'].sum()
+    total_clients = df['clients_lp'].sum()
     st.metric(
         label="Clients Uniques",
         value=f"{total_clients:,.0f}",
-        delta=None,
-        help="Nombre de clients uniques"
+        help="Nombre de clients uniques Le Plein"
     )
 
 with col4:
-    total_energy = df['kwh_lp'].sum() / 1000
+    avg_taux_fid = df['taux_fid'].mean()
     st.metric(
-        label="Énergie Livrée",
-        value=f"{total_energy:.1f}k kWh",
-        delta=None,
-        help="Énergie totale livrée"
+        label="Taux Fidélité Moyen",
+        value=f"{avg_taux_fid:.1f}%",
+        help="Taux de fidélisation moyen"
     )
 
 # Section : Graphiques
@@ -229,9 +188,9 @@ col1, col2 = st.columns(2)
 
 with col1:
     # Graphique : Sessions par enseigne
-    sessions_by_enseigne = df.groupby('enseigne')['sessions_lp'].sum().reset_index()
+    sessions_by_retailer = df.groupby('enseigne')['sessions_lp'].sum().reset_index()
     fig1 = px.bar(
-        sessions_by_enseigne,
+        sessions_by_retailer,
         x='enseigne',
         y='sessions_lp',
         title="Sessions Le Plein par Enseigne",
@@ -244,9 +203,9 @@ with col1:
 
 with col2:
     # Graphique : Part de marché par enseigne
-    pdm_by_enseigne = df.groupby('enseigne')['pdm_lp'].mean().reset_index()
+    pdm_by_retailer = df.groupby('enseigne')['pdm_lp'].mean().reset_index()
     fig2 = px.bar(
-        pdm_by_enseigne,
+        pdm_by_retailer,
         x='enseigne',
         y='pdm_lp',
         title="Part de Marché Moyenne par Enseigne",
@@ -257,35 +216,27 @@ with col2:
     fig2.update_layout(showlegend=False)
     st.plotly_chart(fig2, use_container_width=True)
 
-# Section : Mix de puissance
-st.header("⚡ Mix de Puissance")
+# Section : Comparaison opérateurs
+st.header("🏢 Comparaison Opérateurs")
 
-col1, col2, col3 = st.columns(3)
+total_sessions_by_operator = {
+    'Le Plein': df['sessions_lp'].sum(),
+    'EMSP': df['sessions_emsp'].sum(),
+    'Chargemap': df['sessions_chargemap'].sum(),
+    'TotalEnergies': df['sessions_totalenergies'].sum()
+}
 
-with col1:
-    avg_eco = df['pct_eco'].mean()
-    st.metric("% Eco (≤22kW)", f"{avg_eco:.1f}%")
-
-with col2:
-    avg_fast = df['pct_fast'].mean()
-    st.metric("% Fast (22-100kW)", f"{avg_fast:.1f}%")
-
-with col3:
-    avg_ultra = df['pct_ultra'].mean()
-    st.metric("% Ultra (>100kW)", f"{avg_ultra:.1f}%")
-
-# Graphique camembert
-power_mix = pd.DataFrame({
-    'Type': ['Eco', 'Fast', 'Ultra'],
-    'Percentage': [avg_eco, avg_fast, avg_ultra]
-})
+operator_df = pd.DataFrame(
+    list(total_sessions_by_operator.items()),
+    columns=['Opérateur', 'Sessions']
+)
 
 fig3 = px.pie(
-    power_mix,
-    values='Percentage',
-    names='Type',
-    title="Répartition du Mix de Puissance",
-    color_discrete_sequence=['#00838f', '#1c4587', '#6a1b9a']
+    operator_df,
+    values='Sessions',
+    names='Opérateur',
+    title="Répartition des sessions par opérateur",
+    color_discrete_sequence=['#2c5f2d', '#1c4587', '#6a1b9a', '#00838f']
 )
 st.plotly_chart(fig3, use_container_width=True)
 
@@ -294,25 +245,25 @@ st.header("📋 Données Détaillées par Site")
 
 # Colonnes à afficher
 display_columns = [
-    'site', 'enseigne', 'sessions_lp', 'pdm_lp', 'clients_uniques',
-    'kwh_lp', 'taux_fid', 'pdc_actifs', 'pdc_hs'
+    'site', 'enseigne', 'sessions_lp', 'pdm_lp', 'clients_lp',
+    'taux_fid', 'sessions_total'
 ]
 
 # Formater les nombres
 df_display = df[display_columns].copy()
 df_display['sessions_lp'] = df_display['sessions_lp'].apply(lambda x: f"{x:,.0f}")
 df_display['pdm_lp'] = df_display['pdm_lp'].apply(lambda x: f"{x:.1f}%")
-df_display['clients_uniques'] = df_display['clients_uniques'].apply(lambda x: f"{x:,.0f}")
-df_display['kwh_lp'] = df_display['kwh_lp'].apply(lambda x: f"{x:,.0f}")
+df_display['clients_lp'] = df_display['clients_lp'].apply(lambda x: f"{x:,.0f}")
 df_display['taux_fid'] = df_display['taux_fid'].apply(lambda x: f"{x:.1f}%")
+df_display['sessions_total'] = df_display['sessions_total'].apply(lambda x: f"{x:,.0f}")
 
 # Renommer les colonnes
 df_display.columns = [
     'Site', 'Enseigne', 'Sessions LP', 'PDM LP', 'Clients',
-    'kWh LP', 'Taux FID', 'PDC Actifs', 'PDC HS'
+    'Taux FID', 'Sessions Total'
 ]
 
-# Afficher le tableau avec possibilité de tri
+# Afficher le tableau
 st.dataframe(
     df_display,
     use_container_width=True,
@@ -329,4 +280,4 @@ st.download_button(
 
 # Footer
 st.markdown("---")
-st.caption(f"Dernière mise à jour : {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+st.caption(f"Source : analytics.main.le_plein_monitoring_aggregated | Dernière mise à jour : {datetime.now().strftime('%d/%m/%Y %H:%M')}")
